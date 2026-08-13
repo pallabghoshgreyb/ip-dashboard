@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ip-dashboard-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: your_secure_password_here
+      POSTGRES_DB: ip_dashboard
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persist database data
+      - postgres_data:/var/lib/postgresql/data
+      # Initialize database with schema
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ip-dashboard-network
+
+  # Node.js Backend + Frontend
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ip-dashboard-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Match your PostgreSQL credentials above
+      DATABASE_URL: postgresql://postgres:your_secure_password_here@postgres:5432/ip_dashboard
+      PGSSL: "false"
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change_me}
+      PORT: 3000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    volumes:
+      # Optional: mount for live log viewing
+      - ./logs:/app/logs
+    networks:
+      - ip-dashboard-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  ip-dashboard-network:
+    driver: bridge

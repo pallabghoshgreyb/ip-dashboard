@@ -1,0 +1,20 @@
+{
+  "name": "ip-valuation-dashboard",
+  "version": "1.0.0",
+  "description": "GreyB IP Valuation Dashboard — Express + Postgres backend, React frontend",
+  "main": "server/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "build:client": "cd client && npm install && npm run build"
+  },
+  "dependencies": {
+    "basic-auth": "^2.0.1",
+    "dotenv": "^16.4.5",
+    "exceljs": "^3.4.0",
+    "express": "^4.19.2",
+    "multer": "^2.2.0",
+    "pg": "^8.12.0"
+  }
+}
