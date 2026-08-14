@@ -3,3 +3,4 @@ node_modules/
 *.log
 client/dist/
 .DS_Store
+*.backup
