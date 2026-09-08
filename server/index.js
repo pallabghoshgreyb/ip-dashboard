@@ -45,6 +45,120 @@ const COLUMNS = [
 
 app.use(express.json());
 
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, service: 'patindex-api' });
+});
+
+app.get('/api/db-check', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        version() AS version,
+        current_database() AS database,
+        current_user AS username,
+        EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'app') AS app,
+        EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'rankings') AS rankings,
+        EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'patents') AS patents
+    `);
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('GET /api/db-check failed:', err.message);
+    res.status(503).json({ error: 'Database unavailable.' });
+  }
+});
+
+app.get('/api/patents/index', async (req, res) => {
+  try {
+    const versionResult = await pool.query(
+      `SELECT id, label, filename, uploaded_at, row_count
+       FROM patents.dataset_versions
+       WHERE is_current = true
+       LIMIT 1`
+    );
+    const version = versionResult.rows[0];
+
+    if (!version) {
+      return res.status(404).json({ error: 'No current patent dataset.' });
+    }
+
+    const etag = `"${version.id}"`;
+    res.set('ETag', etag);
+    if (req.headers['if-none-match']?.split(',').map((value) => value.trim()).includes(etag)) {
+      return res.status(304).end();
+    }
+
+    const { rows } = await pool.query(
+      `SELECT raw - ARRAY[
+         'Backward Cited Patents or Backward Citations',
+         'Forward Citing Patents or Forward Citations',
+         'CPCs',
+         'CPCs (2)',
+         'IPCs',
+         'INPADOC Family Members',
+         'Market Region or Geographical Distribution or Geo Graphical Distribution',
+         'GAU - Definiations or GAU Definitions'
+       ]::text[] AS raw
+       FROM patents.records
+       WHERE version_id = $1
+       ORDER BY id`,
+      [version.id]
+    );
+
+    res.json({
+      rows: rows.map((row) => row.raw),
+      version: {
+        label: version.label,
+        filename: version.filename,
+        uploaded_at: version.uploaded_at,
+        row_count: version.row_count,
+      },
+    });
+  } catch (err) {
+    console.error('GET /api/patents/index failed:', err.message);
+    res.status(500).json({ error: 'Could not load patent index.' });
+  }
+});
+
+app.get('/api/patents/detail/:publicationNumber', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT raw
+       FROM patents.records AS r
+       JOIN patents.dataset_versions AS v ON v.id = r.version_id
+       WHERE v.is_current = true AND r.publication_number = $1
+       LIMIT 1`,
+      [req.params.publicationNumber]
+    );
+
+    if (!rows[0]) {
+      return res.status(404).json({ error: 'Patent record not found.' });
+    }
+    res.json(rows[0].raw);
+  } catch (err) {
+    console.error('GET /api/patents/detail failed:', err.message);
+    res.status(500).json({ error: 'Could not load patent detail.' });
+  }
+});
+
+app.get('/api/patents/meta', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT *
+       FROM patents.dataset_versions
+       WHERE is_current = true
+       LIMIT 1`
+    );
+
+    if (!rows[0]) {
+      return res.status(404).json({ error: 'No current patent dataset.' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('GET /api/patents/meta failed:', err.message);
+    res.status(500).json({ error: 'Could not load patent metadata.' });
+  }
+});
+
 // ---- Public API: current dataset -------------------------------------------------
 
 app.get('/api/companies', async (req, res) => {
