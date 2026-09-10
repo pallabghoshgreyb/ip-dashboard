@@ -1,6 +1,8 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const path = require('path');
 const express = require('express');
+const ExcelJS = require('exceljs');
 const multer = require('multer');
 const { pool } = require('./db');
 const { requireAdmin } = require('./auth');
@@ -17,6 +19,31 @@ const PORT = process.env.PORT || 3000;
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 100 * 1024 * 1024 }, // 20MB is generous for this workbook
+  fileFilter: (req, file, cb) => {
+    const okExt = /\.xlsx$/i.test(file.originalname);
+    const okMime = file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    if (okExt || okMime) return cb(null, true);
+    cb(new Error('Only .xlsx files are accepted.'));
+  },
+});
+
+function normalizeCellValue(value) {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (typeof value === 'object') {
+    if (Object.prototype.hasOwnProperty.call(value, 'result')) return normalizeCellValue(value.result);
+    if (Object.prototype.hasOwnProperty.call(value, 'richText')) {
+      return (value.richText || []).map((part) => (part && part.text !== undefined ? part.text : '')).join('');
+    }
+    if (Object.prototype.hasOwnProperty.call(value, 'text')) return value.text;
+    if (Object.prototype.hasOwnProperty.call(value, 'error')) return null;
+  }
+  return value;
+}
+
+const patentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const okExt = /\.xlsx$/i.test(file.originalname);
     const okMime = file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -156,6 +183,117 @@ app.get('/api/patents/meta', async (req, res) => {
   } catch (err) {
     console.error('GET /api/patents/meta failed:', err.message);
     res.status(500).json({ error: 'Could not load patent metadata.' });
+  }
+});
+
+app.post('/api/patents/upload', requireAdmin, patentUpload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file was uploaded.' });
+  }
+
+  let workbook;
+  try {
+    workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(req.file.buffer);
+  } catch (err) {
+    return res.status(400).json({ error: 'Could not read Excel workbook: ' + err.message });
+  }
+
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) {
+    return res.status(400).json({ error: 'The workbook has no sheets.' });
+  }
+
+  const headerRow = worksheet.getRow(1);
+  const headers = headerRow.values.slice(1);
+  if (!headers.length) {
+    return res.status(400).json({ error: 'The workbook is missing a header row.' });
+  }
+
+  const duplicateHeaders = headers.filter((header, index) => headers.indexOf(header) !== index);
+  if (duplicateHeaders.length) {
+    const uniqueDuplicates = [...new Set(duplicateHeaders)];
+    return res.status(400).json({ error: `Duplicate column headings detected: ${uniqueDuplicates.map((h) => `"${String(h)}"`).join(', ')}` });
+  }
+
+  const publicationNumberIndex = headers.indexOf('Publication Number');
+  if (publicationNumberIndex === -1) {
+    return res.status(400).json({ error: 'Missing required "Publication Number" column.' });
+  }
+
+  const rows = [];
+  for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    const record = {};
+    let hasAnyValue = false;
+
+    headers.forEach((header, index) => {
+      const cellValue = normalizeCellValue(row.getCell(index + 1).value);
+      record[header] = cellValue;
+      if (cellValue !== null && cellValue !== undefined && !(typeof cellValue === 'string' && cellValue === '')) {
+        hasAnyValue = true;
+      }
+    });
+
+    if (!hasAnyValue) continue;
+
+    const publicationNumberValue = record['Publication Number'];
+    if (publicationNumberValue === null || publicationNumberValue === undefined || String(publicationNumberValue).trim() === '') {
+      return res.status(400).json({ error: `Row ${rowNumber} is missing a Publication Number value.` });
+    }
+
+    rows.push(record);
+  }
+
+  if (rows.length === 0) {
+    return res.status(400).json({ error: 'No data rows found in the workbook.' });
+  }
+
+  const fileHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const versionIdResult = await client.query("SELECT nextval(pg_get_serial_sequence('patents.dataset_versions','id')) AS id");
+    const versionId = versionIdResult.rows[0].id;
+    const versionLabel = `v${versionId}`;
+
+    await client.query(
+      `INSERT INTO patents.dataset_versions (
+        id, label, filename, file_sha256, row_count, column_count, columns, uploaded_at, is_current, notes
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), false, NULL)`,
+      [versionId, versionLabel, req.file.originalname, fileHash, rows.length, headers.length, JSON.stringify(headers)]
+    );
+
+    const insertRecordSql = `
+      INSERT INTO patents.records (version_id, publication_number, raw)
+      VALUES ($1, $2, $3)
+    `;
+
+    for (const record of rows) {
+      await client.query(insertRecordSql, [versionId, record['Publication Number'], JSON.stringify(record)]);
+    }
+
+    const deleteResult = await client.query('DELETE FROM patents.records WHERE version_id <> $1', [versionId]);
+    await client.query('UPDATE patents.dataset_versions SET is_current = false');
+    await client.query('UPDATE patents.dataset_versions SET is_current = true WHERE id = $1', [versionId]);
+
+    await client.query('COMMIT');
+
+    res.json({
+      ok: true,
+      version: { id: versionId, label: versionLabel },
+      rowCount: rows.length,
+      columnCount: headers.length,
+      replacedRows: deleteResult.rowCount,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('POST /api/patents/upload failed:', err.message);
+    res.status(500).json({ error: 'Could not import patent workbook: ' + err.message });
+  } finally {
+    client.release();
   }
 });
 
