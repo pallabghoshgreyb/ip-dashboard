@@ -317,42 +317,92 @@ app.get('/admin', requireAdmin, (req, res) => {
 <html>
 <head><meta charset="utf-8"><title>Upload data — IP Valuation Dashboard</title>
 <style>
-  body { font-family: -apple-system, sans-serif; max-width: 520px; margin: 60px auto; color: #16233d; }
+  body { font-family: -apple-system, sans-serif; max-width: 760px; margin: 60px auto; color: #16233d; }
   h1 { font-size: 20px; }
-  form { border: 1px solid #dfe4ec; border-radius: 10px; padding: 20px; margin-top: 16px; }
+  h2 { font-size: 18px; margin-top: 24px; }
+  .panel { border: 1px solid #dfe4ec; border-radius: 10px; padding: 20px; margin-top: 16px; }
+  .panel p { margin: 6px 0; color: #5b6b85; font-size: 13.5px; }
+  form { margin-top: 12px; }
   input[type=file] { margin: 12px 0; }
   button { background: #a8762a; color: #fff; border: none; padding: 10px 18px; border-radius: 6px; cursor: pointer; font-size: 14px; }
   button:hover { background: #8f6321; }
-  #status { margin-top: 14px; font-size: 13.5px; white-space: pre-wrap; }
+  .status { margin-top: 14px; font-size: 13.5px; white-space: pre-wrap; }
   .ok { color: #1e9e6b; } .err { color: #c44536; }
 </style>
 </head>
 <body>
-  <h1>Upload updated ranking data (.xlsx)</h1>
-  <p style="color:#5b6b85; font-size:13.5px;">File must keep the same sheet names as the original template: "US Companies", "33 US Companies", "Companies Websites".</p>
-  <form id="f">
-    <input type="file" name="file" accept=".xlsx" required />
-    <br/>
-    <button type="submit">Upload &amp; replace data</button>
-  </form>
-  <div id="status"></div>
+  <h1>Upload data</h1>
+  <div class="panel">
+    <h2>Company ranking data</h2>
+    <p>This upload replaces the current company ranking dataset.</p>
+    <p>Warning: this replaces the current data with no undo.</p>
+    <form id="company-form">
+      <input type="file" name="file" accept=".xlsx" required />
+      <br/>
+      <button type="submit">Upload &amp; replace company data</button>
+    </form>
+    <div id="company-status" class="status"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Patent data</h2>
+    <p>This upload replaces the current patent dataset.</p>
+    <p>Warning: this replaces the current data with no undo.</p>
+    <form id="patent-form">
+      <input type="file" name="file" accept=".xlsx" required />
+      <br/>
+      <button type="submit">Upload &amp; replace patent data</button>
+    </form>
+    <div id="patent-status" class="status"></div>
+  </div>
+
   <script>
-    const form = document.getElementById('f');
-    const status = document.getElementById('status');
-    form.addEventListener('submit', async (e) => {
+    function setStatus(node, message, isError) {
+      node.className = 'status' + (isError ? ' err' : ' ok');
+      node.textContent = message;
+    }
+
+    const companyForm = document.getElementById('company-form');
+    const companyStatus = document.getElementById('company-status');
+    companyForm.addEventListener('submit', async (e) => {
       e.preventDefault();
-      status.textContent = 'Uploading and parsing...';
-      status.className = '';
-      const body = new FormData(form);
+      if (!confirm('This will replace the current company ranking data with no undo. Continue?')) {
+        return;
+      }
+      companyStatus.textContent = 'Uploading and parsing...';
+      companyStatus.className = 'status';
+      const body = new FormData(companyForm);
       try {
         const res = await fetch('/api/upload', { method: 'POST', body });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Upload failed');
-        status.className = 'ok';
-        status.textContent = 'Done — ' + data.rowCount + ' companies loaded.' + (data.warnings && data.warnings.length ? '\\n\\nWarnings:\\n' + data.warnings.join('\\n') : '');
+        setStatus(companyStatus, 'Done - ' + data.rowCount + ' companies loaded.' + (data.warnings && data.warnings.length ? '\\n\\nWarnings:\\n' + data.warnings.join('\\n') : ''), false);
       } catch (err) {
-        status.className = 'err';
-        status.textContent = 'Error: ' + err.message;
+        setStatus(companyStatus, 'Error: ' + err.message, true);
+      }
+    });
+
+    const patentForm = document.getElementById('patent-form');
+    const patentStatus = document.getElementById('patent-status');
+    patentForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!confirm('This will replace the current patent data with no undo. Continue?')) {
+        return;
+      }
+      patentStatus.textContent = 'Uploading and parsing...';
+      patentStatus.className = 'status';
+      const body = new FormData(patentForm);
+      try {
+        const res = await fetch('/api/patents/upload', { method: 'POST', body });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Upload failed');
+        setStatus(
+          patentStatus,
+          'Version ' + data.version.label + ' loaded: ' + data.rowCount + ' rows, ' + data.columnCount + ' columns, ' + data.replacedRows + ' old rows replaced.',
+          false
+        );
+      } catch (err) {
+        setStatus(patentStatus, err.message, true);
       }
     });
   </script>
