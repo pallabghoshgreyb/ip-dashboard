@@ -379,8 +379,8 @@ app.get('/admin', requireAdmin, (req, res) => {
 
   <div class="panel">
     <h2>Patent data</h2>
-    <p>This upload replaces the current patent dataset.</p>
-    <p>Warning: this replaces the current data with no undo.</p>
+    <p>This upload adds to the patent dataset. A file with the same name updates that batch.</p>
+    <p>Patents from other files are untouched.</p>
     <form id="patent-form">
       <input type="file" name="file" accept=".xlsx" required />
       <br/>
@@ -431,7 +431,7 @@ app.get('/admin', requireAdmin, (req, res) => {
         if (!res.ok) throw new Error(data.error || 'Upload failed');
         setStatus(
           patentStatus,
-          'Version ' + data.version.label + ' loaded: ' + data.rowCount + ' rows, ' + data.columnCount + ' columns, ' + data.replacedRows + ' old rows replaced.',
+          data.filename + ': ' + data.rowCount + ' rows, ' + data.columnCount + ' columns, ' + data.inserted + ' new, ' + data.updated + ' existing. Domains: ' + data.domains.join(', '),
           false
         );
       } catch (err) {
