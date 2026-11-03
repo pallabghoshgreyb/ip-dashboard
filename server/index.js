@@ -221,7 +221,11 @@ app.post('/api/patents/upload', requireAdmin, patentUpload.single('file'), async
     return res.status(400).json({ error: 'Missing required "Publication Number" column.' });
   }
 
+  const filename = req.file.originalname;
+  const tidyDomain = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const filenameDomain = tidyDomain(filename.replace(/\.xlsx$/i, '').replace(/[-_]/g, ' '));
   const rows = [];
+  const rowDomains = [];
   for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
     const row = worksheet.getRow(rowNumber);
     const record = {};
@@ -242,7 +246,16 @@ app.post('/api/patents/upload', requireAdmin, patentUpload.single('file'), async
       return res.status(400).json({ error: `Row ${rowNumber} is missing a Publication Number value.` });
     }
 
+    const domain = tidyDomain(record.Domain);
+    if (!domain) {
+      return res.status(400).json({ error: `Row ${rowNumber} is missing a Domain value.` });
+    }
+    if (domain.toLowerCase() !== filenameDomain.toLowerCase()) {
+      return res.status(400).json({ error: `Row ${rowNumber} Domain "${domain}" does not match filename-derived domain "${filenameDomain}". Check the filename and Domain value.` });
+    }
+
     rows.push(record);
+    rowDomains.push([domain]);
   }
 
   if (rows.length === 0) {
@@ -255,38 +268,58 @@ app.post('/api/patents/upload', requireAdmin, patentUpload.single('file'), async
   try {
     await client.query('BEGIN');
 
-    const versionIdResult = await client.query("SELECT nextval(pg_get_serial_sequence('patents.dataset_versions','id')) AS id");
-    const versionId = versionIdResult.rows[0].id;
-    const versionLabel = `v${versionId}`;
+    const domainsByKey = new Map();
+    for (const domain of rowDomains.flat()) {
+      if (domain && !domainsByKey.has(domain.toLowerCase())) {
+        domainsByKey.set(domain.toLowerCase(), domain);
+      }
+    }
+    const domains = [...domainsByKey.values()];
 
     await client.query(
-      `INSERT INTO patents.dataset_versions (
-        id, label, filename, file_sha256, row_count, column_count, columns, uploaded_at, is_current, notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), false, NULL)`,
-      [versionId, versionLabel, req.file.originalname, fileHash, rows.length, headers.length, JSON.stringify(headers)]
+      `INSERT INTO patents.source_files (
+        filename, file_sha256, row_count, column_count, columns, uploaded_at
+      ) VALUES ($1, $2, $3, $4, $5::jsonb, now())
+      ON CONFLICT (filename) DO UPDATE SET
+        file_sha256 = EXCLUDED.file_sha256,
+        row_count = EXCLUDED.row_count,
+        column_count = EXCLUDED.column_count,
+        columns = EXCLUDED.columns,
+        uploaded_at = EXCLUDED.uploaded_at`,
+      [filename, fileHash, rows.length, headers.length, JSON.stringify(headers)]
     );
 
     const insertRecordSql = `
-      INSERT INTO patents.records (version_id, publication_number, raw)
-      VALUES ($1, $2, $3)
+      INSERT INTO patents.patent (publication_number, raw, domains, source_files)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (publication_number) DO UPDATE SET
+        raw = EXCLUDED.raw,
+        domains = ARRAY(SELECT DISTINCT unnest(patents.patent.domains || EXCLUDED.domains)),
+        source_files = ARRAY(SELECT DISTINCT unnest(patents.patent.source_files || EXCLUDED.source_files)),
+        last_seen_at = now()
+      RETURNING (xmax = 0) AS inserted
     `;
 
-    for (const record of rows) {
-      await client.query(insertRecordSql, [versionId, record['Publication Number'], JSON.stringify(record)]);
+    let inserted = 0;
+    let updated = 0;
+    for (const [index, record] of rows.entries()) {
+      const result = await client.query(insertRecordSql, [
+        record['Publication Number'], JSON.stringify(record), rowDomains[index], [filename],
+      ]);
+      if (result.rows[0].inserted) inserted += 1;
+      else updated += 1;
     }
-
-    const deleteResult = await client.query('DELETE FROM patents.records WHERE version_id <> $1', [versionId]);
-    await client.query('UPDATE patents.dataset_versions SET is_current = false');
-    await client.query('UPDATE patents.dataset_versions SET is_current = true WHERE id = $1', [versionId]);
 
     await client.query('COMMIT');
 
     res.json({
       ok: true,
-      version: { id: versionId, label: versionLabel },
+      filename,
       rowCount: rows.length,
       columnCount: headers.length,
-      replacedRows: deleteResult.rowCount,
+      inserted,
+      updated,
+      domains,
     });
   } catch (err) {
     await client.query('ROLLBACK');
