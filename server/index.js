@@ -7,6 +7,7 @@ const multer = require('multer');
 const { pool } = require('./db');
 const { requireAdmin } = require('./auth');
 const { parseWorkbook } = require('./parseExcel');
+const { createPatentRouter } = require('./patents');
 
 // Last line of defense: log and keep running instead of crashing the whole server
 // on an error we didn't anticipate catching somewhere specific.
@@ -71,6 +72,8 @@ const COLUMNS = [
 ];
 
 app.use(express.json());
+const { router: patentRouter, clearFacetsCache } = createPatentRouter(pool);
+app.use('/api/patents', patentRouter);
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'patindex-api' });
@@ -262,6 +265,7 @@ app.post('/api/patents/upload', requireAdmin, patentUpload.single('file'), async
     }
 
     await client.query('COMMIT');
+    clearFacetsCache();
 
     res.json({
       ok: true,
@@ -428,6 +432,7 @@ app.post('/api/upload', requireAdmin, upload.single('file'), async (req, res) =>
     );
 
     await client.query('COMMIT');
+    clearFacetsCache();
     res.json({ ok: true, rowCount: records.length, warnings });
   } catch (err) {
     if (client) {
